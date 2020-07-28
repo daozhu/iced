@@ -1,4 +1,6 @@
-use crate::{window, Command, Element, Executor, Settings, Subscription};
+use crate::{
+    window, Color, Command, Element, Executor, Settings, Subscription,
+};
 
 /// An interactive cross-platform application.
 ///
@@ -174,6 +176,31 @@ pub trait Application: Sized {
         window::Mode::Windowed
     }
 
+    /// Returns the background color of the [`Application`].
+    ///
+    /// By default, it returns [`Color::WHITE`].
+    ///
+    /// [`Application`]: trait.Application.html
+    /// [`Color::WHITE`]: struct.Color.html#const.WHITE
+    fn background_color(&self) -> Color {
+        Color::WHITE
+    }
+
+    /// Returns the scale factor of the [`Application`].
+    ///
+    /// It can be used to dynamically control the size of the UI at runtime
+    /// (i.e. zooming).
+    ///
+    /// For instance, a scale factor of `2.0` will make widgets twice as big,
+    /// while a scale factor of `0.5` will shrink them to half their size.
+    ///
+    /// By default, it returns `1.0`.
+    ///
+    /// [`Application`]: trait.Application.html
+    fn scale_factor(&self) -> f64 {
+        1.0
+    }
+
     /// Runs the [`Application`].
     ///
     /// On native platforms, this method will take control of the current thread
@@ -188,20 +215,22 @@ pub trait Application: Sized {
     {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let wgpu_settings = iced_wgpu::Settings {
+            let renderer_settings = crate::renderer::Settings {
                 default_font: settings.default_font,
+                default_text_size: settings.default_text_size,
                 antialiasing: if settings.antialiasing {
-                    Some(iced_wgpu::settings::Antialiasing::MSAAx4)
+                    Some(crate::renderer::settings::Antialiasing::MSAAx4)
                 } else {
                     None
                 },
-                ..iced_wgpu::Settings::default()
+                ..crate::renderer::Settings::default()
             };
 
-            <Instance<Self> as iced_winit::Application>::run(
-                settings.into(),
-                wgpu_settings,
-            );
+            crate::runtime::application::run::<
+                Instance<Self>,
+                Self::Executor,
+                crate::renderer::window::Compositor,
+            >(settings.into(), renderer_settings);
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -212,14 +241,28 @@ pub trait Application: Sized {
 struct Instance<A: Application>(A);
 
 #[cfg(not(target_arch = "wasm32"))]
-impl<A> iced_winit::Application for Instance<A>
+impl<A> iced_winit::Program for Instance<A>
 where
     A: Application,
 {
-    type Backend = iced_wgpu::window::Backend;
-    type Executor = A::Executor;
-    type Flags = A::Flags;
+    type Renderer = crate::renderer::Renderer;
     type Message = A::Message;
+
+    fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
+        self.0.update(message)
+    }
+
+    fn view(&mut self) -> Element<'_, Self::Message> {
+        self.0.view()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<A> crate::runtime::Application for Instance<A>
+where
+    A: Application,
+{
+    type Flags = A::Flags;
 
     fn new(flags: Self::Flags) -> (Self, Command<A::Message>) {
         let (app, command) = A::new(flags);
@@ -238,16 +281,16 @@ where
         }
     }
 
-    fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
-        self.0.update(message)
-    }
-
     fn subscription(&self) -> Subscription<Self::Message> {
         self.0.subscription()
     }
 
-    fn view(&mut self) -> Element<'_, Self::Message> {
-        self.0.view()
+    fn background_color(&self) -> Color {
+        self.0.background_color()
+    }
+
+    fn scale_factor(&self) -> f64 {
+        self.0.scale_factor()
     }
 }
 

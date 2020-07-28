@@ -1,9 +1,7 @@
 //! Navigate an endless amount of content with a scrollbar.
 use crate::{
-    column,
-    input::{mouse, ButtonState},
-    layout, Align, Clipboard, Column, Element, Event, Hasher, Layout, Length,
-    Point, Rectangle, Size, Widget,
+    column, layout, mouse, overlay, Align, Clipboard, Column, Element, Event,
+    Hasher, Layout, Length, Point, Rectangle, Size, Vector, Widget,
 };
 
 use std::{f32, hash::Hash, u32};
@@ -115,7 +113,7 @@ impl<'a, Message, Renderer: self::Renderer> Scrollable<'a, Message, Renderer> {
 impl<'a, Message, Renderer> Widget<Message, Renderer>
     for Scrollable<'a, Message, Renderer>
 where
-    Renderer: self::Renderer + column::Renderer,
+    Renderer: self::Renderer,
 {
     fn width(&self) -> Length {
         Widget::<Message, Renderer>::width(&self.content)
@@ -188,10 +186,9 @@ where
 
         if self.state.is_scroller_grabbed() {
             match event {
-                Event::Mouse(mouse::Event::Input {
-                    button: mouse::Button::Left,
-                    state: ButtonState::Released,
-                }) => {
+                Event::Mouse(mouse::Event::ButtonReleased(
+                    mouse::Button::Left,
+                )) => {
                     self.state.scroller_grabbed_at = None;
                 }
                 Event::Mouse(mouse::Event::CursorMoved { .. }) => {
@@ -212,10 +209,9 @@ where
             }
         } else if is_mouse_over_scrollbar {
             match event {
-                Event::Mouse(mouse::Event::Input {
-                    button: mouse::Button::Left,
-                    state: ButtonState::Pressed,
-                }) => {
+                Event::Mouse(mouse::Event::ButtonPressed(
+                    mouse::Button::Left,
+                )) => {
                     if let Some(scrollbar) = scrollbar {
                         if let Some(scroller_grabbed_at) =
                             scrollbar.grab_scroller(cursor_position)
@@ -318,6 +314,24 @@ where
         self.max_height.hash(state);
 
         self.content.hash_layout(state)
+    }
+
+    fn overlay(
+        &mut self,
+        layout: Layout<'_>,
+    ) -> Option<overlay::Element<'_, Message, Renderer>> {
+        let Self { content, state, .. } = self;
+
+        content
+            .overlay(layout.children().next().unwrap())
+            .map(|overlay| {
+                let bounds = layout.bounds();
+                let content_layout = layout.children().next().unwrap();
+                let content_bounds = content_layout.bounds();
+                let offset = state.offset(bounds, content_bounds);
+
+                overlay.translate(Vector::new(0.0, -(offset as f32)))
+            })
     }
 }
 
@@ -458,7 +472,7 @@ pub struct Scroller {
 ///
 /// [`Scrollable`]: struct.Scrollable.html
 /// [renderer]: ../../renderer/index.html
-pub trait Renderer: crate::Renderer + Sized {
+pub trait Renderer: column::Renderer + Sized {
     /// The style supported by this renderer.
     type Style: Default;
 
@@ -506,7 +520,7 @@ pub trait Renderer: crate::Renderer + Sized {
 impl<'a, Message, Renderer> From<Scrollable<'a, Message, Renderer>>
     for Element<'a, Message, Renderer>
 where
-    Renderer: 'a + self::Renderer + column::Renderer,
+    Renderer: 'a + self::Renderer,
     Message: 'a,
 {
     fn from(

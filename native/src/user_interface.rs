@@ -1,6 +1,4 @@
-use crate::{
-    input::mouse, layout, Clipboard, Element, Event, Layout, Point, Size,
-};
+use crate::{layout, overlay, Clipboard, Element, Event, Layout, Point, Size};
 
 use std::hash::Hasher;
 
@@ -21,11 +19,10 @@ use std::hash::Hasher;
 /// [`UserInterface`]: struct.UserInterface.html
 #[allow(missing_debug_implementations)]
 pub struct UserInterface<'a, Message, Renderer> {
-    hash: u64,
     root: Element<'a, Message, Renderer>,
-    layout: layout::Node,
+    base: Layer,
+    overlay: Option<Layer>,
     bounds: Size,
-    cursor_position: Point,
 }
 
 impl<'a, Message, Renderer> UserInterface<'a, Message, Renderer>
@@ -97,25 +94,37 @@ where
     ) -> Self {
         let root = root.into();
 
-        let hash = {
-            let hasher = &mut crate::Hasher::default();
-            root.hash_layout(hasher);
+        let (base, overlay) = {
+            let hash = {
+                let hasher = &mut crate::Hasher::default();
+                root.hash_layout(hasher);
 
-            hasher.finish()
-        };
+                hasher.finish()
+            };
 
-        let layout = if hash == cache.hash && bounds == cache.bounds {
-            cache.layout
-        } else {
-            renderer.layout(&root, &layout::Limits::new(Size::ZERO, bounds))
+            let layout_is_cached =
+                hash == cache.base.hash && bounds == cache.bounds;
+
+            let (layout, overlay) = if layout_is_cached {
+                (cache.base.layout, cache.overlay)
+            } else {
+                (
+                    renderer.layout(
+                        &root,
+                        &layout::Limits::new(Size::ZERO, bounds),
+                    ),
+                    None,
+                )
+            };
+
+            (Layer { layout, hash }, overlay)
         };
 
         UserInterface {
-            hash,
             root,
-            layout,
+            base,
+            overlay,
             bounds,
-            cursor_position: cache.cursor_position,
         }
     }
 
@@ -132,7 +141,7 @@ where
     /// completing [the previous example](#example):
     ///
     /// ```no_run
-    /// use iced_native::{UserInterface, Cache, Size};
+    /// use iced_native::{UserInterface, Cache, Size, Point};
     /// use iced_wgpu::Renderer;
     ///
     /// # mod iced_wgpu {
@@ -154,6 +163,7 @@ where
     /// let mut cache = Cache::new();
     /// let mut renderer = Renderer::new();
     /// let mut window_size = Size::new(1024.0, 768.0);
+    /// let mut cursor_position = Point::default();
     ///
     /// // Initialize our event storage
     /// let mut events = Vec::new();
@@ -169,7 +179,12 @@ where
     ///     );
     ///
     ///     // Update the user interface
-    ///     let messages = user_interface.update(events.drain(..), None, &renderer);
+    ///     let messages = user_interface.update(
+    ///         &events,
+    ///         cursor_position,
+    ///         None,
+    ///         &renderer,
+    ///     );
     ///
     ///     cache = user_interface.into_cache();
     ///
@@ -181,21 +196,54 @@ where
     /// ```
     pub fn update(
         &mut self,
-        events: impl IntoIterator<Item = Event>,
+        events: &[Event],
+        cursor_position: Point,
         clipboard: Option<&dyn Clipboard>,
         renderer: &Renderer,
     ) -> Vec<Message> {
         let mut messages = Vec::new();
 
-        for event in events {
-            if let Event::Mouse(mouse::Event::CursorMoved { x, y }) = event {
-                self.cursor_position = Point::new(x, y);
+        let base_cursor = if let Some(mut overlay) =
+            self.root.overlay(Layout::new(&self.base.layout))
+        {
+            let layer = Self::overlay_layer(
+                self.overlay.take(),
+                self.bounds,
+                &mut overlay,
+                renderer,
+            );
+
+            for event in events {
+                overlay.on_event(
+                    event.clone(),
+                    Layout::new(&layer.layout),
+                    cursor_position,
+                    &mut messages,
+                    renderer,
+                    clipboard,
+                );
             }
 
+            let base_cursor = if layer.layout.bounds().contains(cursor_position)
+            {
+                // TODO: Type-safe cursor availability
+                Point::new(-1.0, -1.0)
+            } else {
+                cursor_position
+            };
+
+            self.overlay = Some(layer);
+
+            base_cursor
+        } else {
+            cursor_position
+        };
+
+        for event in events {
             self.root.widget.on_event(
-                event,
-                Layout::new(&self.layout),
-                self.cursor_position,
+                event.clone(),
+                Layout::new(&self.base.layout),
+                base_cursor,
                 &mut messages,
                 renderer,
                 clipboard,
@@ -219,7 +267,7 @@ where
     /// [completing the last example](#example-1):
     ///
     /// ```no_run
-    /// use iced_native::{UserInterface, Cache, Size};
+    /// use iced_native::{UserInterface, Cache, Size, Point};
     /// use iced_wgpu::Renderer;
     ///
     /// # mod iced_wgpu {
@@ -241,6 +289,7 @@ where
     /// let mut cache = Cache::new();
     /// let mut renderer = Renderer::new();
     /// let mut window_size = Size::new(1024.0, 768.0);
+    /// let mut cursor_position = Point::default();
     /// let mut events = Vec::new();
     ///
     /// loop {
@@ -253,10 +302,15 @@ where
     ///         &mut renderer,
     ///     );
     ///
-    ///     let messages = user_interface.update(events.drain(..), None, &renderer);
+    ///     let messages = user_interface.update(
+    ///         &events,
+    ///         cursor_position,
+    ///         None,
+    ///         &renderer,
+    ///     );
     ///
     ///     // Draw the user interface
-    ///     let mouse_cursor = user_interface.draw(&mut renderer);
+    ///     let mouse_cursor = user_interface.draw(&mut renderer, cursor_position);
     ///
     ///     cache = user_interface.into_cache();
     ///
@@ -268,13 +322,64 @@ where
     ///     // Flush rendering operations...
     /// }
     /// ```
-    pub fn draw(&self, renderer: &mut Renderer) -> Renderer::Output {
-        self.root.widget.draw(
-            renderer,
-            &Renderer::Defaults::default(),
-            Layout::new(&self.layout),
-            self.cursor_position,
-        )
+    pub fn draw(
+        &mut self,
+        renderer: &mut Renderer,
+        cursor_position: Point,
+    ) -> Renderer::Output {
+        let overlay = if let Some(mut overlay) =
+            self.root.overlay(Layout::new(&self.base.layout))
+        {
+            let layer = Self::overlay_layer(
+                self.overlay.take(),
+                self.bounds,
+                &mut overlay,
+                renderer,
+            );
+
+            let overlay_bounds = layer.layout.bounds();
+
+            let overlay_primitives = overlay.draw(
+                renderer,
+                &Renderer::Defaults::default(),
+                Layout::new(&layer.layout),
+                cursor_position,
+            );
+
+            self.overlay = Some(layer);
+
+            Some((overlay_primitives, overlay_bounds))
+        } else {
+            None
+        };
+
+        if let Some((overlay_primitives, overlay_bounds)) = overlay {
+            let base_cursor = if overlay_bounds.contains(cursor_position) {
+                Point::new(-1.0, -1.0)
+            } else {
+                cursor_position
+            };
+
+            let base_primitives = self.root.widget.draw(
+                renderer,
+                &Renderer::Defaults::default(),
+                Layout::new(&self.base.layout),
+                base_cursor,
+            );
+
+            renderer.overlay(
+                base_primitives,
+                overlay_primitives,
+                overlay_bounds,
+            )
+        } else {
+            self.root.widget.draw(
+                renderer,
+                &Renderer::Defaults::default(),
+                Layout::new(&self.base.layout),
+                cursor_position,
+            )
+        }
     }
 
     /// Extract the [`Cache`] of the [`UserInterface`], consuming it in the
@@ -284,12 +389,41 @@ where
     /// [`UserInterface`]: struct.UserInterface.html
     pub fn into_cache(self) -> Cache {
         Cache {
-            hash: self.hash,
-            layout: self.layout,
+            base: self.base,
+            overlay: self.overlay,
             bounds: self.bounds,
-            cursor_position: self.cursor_position,
         }
     }
+
+    fn overlay_layer(
+        cache: Option<Layer>,
+        bounds: Size,
+        overlay: &mut overlay::Element<'_, Message, Renderer>,
+        renderer: &Renderer,
+    ) -> Layer {
+        let new_hash = {
+            let hasher = &mut crate::Hasher::default();
+            overlay.hash_layout(hasher);
+
+            hasher.finish()
+        };
+
+        let layout = match cache {
+            Some(Layer { hash, layout }) if new_hash == hash => layout,
+            _ => overlay.layout(renderer, bounds),
+        };
+
+        Layer {
+            layout,
+            hash: new_hash,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Layer {
+    layout: layout::Node,
+    hash: u64,
 }
 
 /// Reusable data of a specific [`UserInterface`].
@@ -297,10 +431,9 @@ where
 /// [`UserInterface`]: struct.UserInterface.html
 #[derive(Debug, Clone)]
 pub struct Cache {
-    hash: u64,
-    layout: layout::Node,
+    base: Layer,
+    overlay: Option<Layer>,
     bounds: Size,
-    cursor_position: Point,
 }
 
 impl Cache {
@@ -313,10 +446,12 @@ impl Cache {
     /// [`UserInterface`]: struct.UserInterface.html
     pub fn new() -> Cache {
         Cache {
-            hash: 0,
-            layout: layout::Node::new(Size::new(0.0, 0.0)),
+            base: Layer {
+                layout: layout::Node::new(Size::new(0.0, 0.0)),
+                hash: 0,
+            },
+            overlay: None,
             bounds: Size::ZERO,
-            cursor_position: Point::new(-1.0, -1.0),
         }
     }
 }
@@ -326,11 +461,3 @@ impl Default for Cache {
         Cache::new()
     }
 }
-
-impl PartialEq for Cache {
-    fn eq(&self, other: &Cache) -> bool {
-        self.hash == other.hash && self.cursor_position == other.cursor_position
-    }
-}
-
-impl Eq for Cache {}
