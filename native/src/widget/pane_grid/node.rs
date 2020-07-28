@@ -5,20 +5,122 @@ use crate::{
 
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Hash)]
+/// A layout node of a [`PaneGrid`].
+///
+/// [`PaneGrid`]: struct.PaneGrid.html
+#[derive(Debug, Clone)]
 pub enum Node {
+    /// The region of this [`Node`] is split into two.
+    ///
+    /// [`Node`]: enum.Node.html
     Split {
+        /// The [`Split`] of this [`Node`].
+        ///
+        /// [`Split`]: struct.Split.html
+        /// [`Node`]: enum.Node.html
         id: Split,
+
+        /// The direction of the split.
         axis: Axis,
-        ratio: u32,
+
+        /// The ratio of the split in [0.0, 1.0].
+        ratio: f32,
+
+        /// The left/top [`Node`] of the split.
+        ///
+        /// [`Node`]: enum.Node.html
         a: Box<Node>,
+
+        /// The right/bottom [`Node`] of the split.
+        ///
+        /// [`Node`]: enum.Node.html
         b: Box<Node>,
     },
+    /// The region of this [`Node`] is taken by a [`Pane`].
+    ///
+    /// [`Pane`]: struct.Pane.html
     Pane(Pane),
 }
 
 impl Node {
-    pub fn find(&mut self, pane: &Pane) -> Option<&mut Node> {
+    /// Returns an iterator over each [`Split`] in this [`Node`].
+    ///
+    /// [`Split`]: struct.Split.html
+    /// [`Node`]: enum.Node.html
+    pub fn splits(&self) -> impl Iterator<Item = &Split> {
+        let mut unvisited_nodes = vec![self];
+
+        std::iter::from_fn(move || {
+            while let Some(node) = unvisited_nodes.pop() {
+                match node {
+                    Node::Split { id, a, b, .. } => {
+                        unvisited_nodes.push(a);
+                        unvisited_nodes.push(b);
+
+                        return Some(id);
+                    }
+                    _ => {}
+                }
+            }
+
+            None
+        })
+    }
+
+    /// Returns the rectangular region for each [`Pane`] in the [`Node`] given
+    /// the spacing between panes and the total available space.
+    ///
+    /// [`Pane`]: struct.Pane.html
+    /// [`Node`]: enum.Node.html
+    pub fn pane_regions(
+        &self,
+        spacing: f32,
+        size: Size,
+    ) -> HashMap<Pane, Rectangle> {
+        let mut regions = HashMap::new();
+
+        self.compute_regions(
+            spacing,
+            &Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: size.width,
+                height: size.height,
+            },
+            &mut regions,
+        );
+
+        regions
+    }
+
+    /// Returns the axis, rectangular region, and ratio for each [`Split`] in
+    /// the [`Node`] given the spacing between panes and the total available
+    /// space.
+    ///
+    /// [`Split`]: struct.Split.html
+    /// [`Node`]: enum.Node.html
+    pub fn split_regions(
+        &self,
+        spacing: f32,
+        size: Size,
+    ) -> HashMap<Split, (Axis, Rectangle, f32)> {
+        let mut splits = HashMap::new();
+
+        self.compute_splits(
+            spacing,
+            &Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: size.width,
+                height: size.height,
+            },
+            &mut splits,
+        );
+
+        splits
+    }
+
+    pub(crate) fn find(&mut self, pane: &Pane) -> Option<&mut Node> {
         match self {
             Node::Split { a, b, .. } => {
                 a.find(pane).or_else(move || b.find(pane))
@@ -33,17 +135,17 @@ impl Node {
         }
     }
 
-    pub fn split(&mut self, id: Split, axis: Axis, new_pane: Pane) {
+    pub(crate) fn split(&mut self, id: Split, axis: Axis, new_pane: Pane) {
         *self = Node::Split {
             id,
             axis,
-            ratio: 500_000,
+            ratio: 0.5,
             a: Box::new(self.clone()),
             b: Box::new(Node::Pane(new_pane)),
         };
     }
 
-    pub fn update(&mut self, f: &impl Fn(&mut Node)) {
+    pub(crate) fn update(&mut self, f: &impl Fn(&mut Node)) {
         match self {
             Node::Split { a, b, .. } => {
                 a.update(f);
@@ -55,13 +157,13 @@ impl Node {
         f(self);
     }
 
-    pub fn resize(&mut self, split: &Split, percentage: f32) -> bool {
+    pub(crate) fn resize(&mut self, split: &Split, percentage: f32) -> bool {
         match self {
             Node::Split {
                 id, ratio, a, b, ..
             } => {
                 if id == split {
-                    *ratio = (percentage * 1_000_000.0).round() as u32;
+                    *ratio = percentage;
 
                     true
                 } else if a.resize(split, percentage) {
@@ -74,7 +176,7 @@ impl Node {
         }
     }
 
-    pub fn remove(&mut self, pane: &Pane) -> Option<Pane> {
+    pub(crate) fn remove(&mut self, pane: &Pane) -> Option<Pane> {
         match self {
             Node::Split { a, b, .. } => {
                 if a.pane() == Some(*pane) {
@@ -91,56 +193,14 @@ impl Node {
         }
     }
 
-    pub fn regions(
-        &self,
-        spacing: f32,
-        size: Size,
-    ) -> HashMap<Pane, Rectangle> {
-        let mut regions = HashMap::new();
-
-        self.compute_regions(
-            spacing / 2.0,
-            &Rectangle {
-                x: 0.0,
-                y: 0.0,
-                width: size.width,
-                height: size.height,
-            },
-            &mut regions,
-        );
-
-        regions
-    }
-
-    pub fn splits(
-        &self,
-        spacing: f32,
-        size: Size,
-    ) -> HashMap<Split, (Axis, Rectangle, f32)> {
-        let mut splits = HashMap::new();
-
-        self.compute_splits(
-            spacing / 2.0,
-            &Rectangle {
-                x: 0.0,
-                y: 0.0,
-                width: size.width,
-                height: size.height,
-            },
-            &mut splits,
-        );
-
-        splits
-    }
-
-    pub fn pane(&self) -> Option<Pane> {
+    fn pane(&self) -> Option<Pane> {
         match self {
             Node::Split { .. } => None,
             Node::Pane(pane) => Some(*pane),
         }
     }
 
-    pub fn first_pane(&self) -> Pane {
+    fn first_pane(&self) -> Pane {
         match self {
             Node::Split { a, .. } => a.first_pane(),
             Node::Pane(pane) => *pane,
@@ -149,7 +209,7 @@ impl Node {
 
     fn compute_regions(
         &self,
-        halved_spacing: f32,
+        spacing: f32,
         current: &Rectangle,
         regions: &mut HashMap<Pane, Rectangle>,
     ) {
@@ -157,12 +217,10 @@ impl Node {
             Node::Split {
                 axis, ratio, a, b, ..
             } => {
-                let ratio = *ratio as f32 / 1_000_000.0;
-                let (region_a, region_b) =
-                    axis.split(current, ratio, halved_spacing);
+                let (region_a, region_b) = axis.split(current, *ratio, spacing);
 
-                a.compute_regions(halved_spacing, &region_a, regions);
-                b.compute_regions(halved_spacing, &region_b, regions);
+                a.compute_regions(spacing, &region_a, regions);
+                b.compute_regions(spacing, &region_b, regions);
             }
             Node::Pane(pane) => {
                 let _ = regions.insert(*pane, *current);
@@ -172,7 +230,7 @@ impl Node {
 
     fn compute_splits(
         &self,
-        halved_spacing: f32,
+        spacing: f32,
         current: &Rectangle,
         splits: &mut HashMap<Split, (Axis, Rectangle, f32)>,
     ) {
@@ -184,16 +242,37 @@ impl Node {
                 b,
                 id,
             } => {
-                let ratio = *ratio as f32 / 1_000_000.0;
-                let (region_a, region_b) =
-                    axis.split(current, ratio, halved_spacing);
+                let (region_a, region_b) = axis.split(current, *ratio, spacing);
 
-                let _ = splits.insert(*id, (*axis, *current, ratio));
+                let _ = splits.insert(*id, (*axis, *current, *ratio));
 
-                a.compute_splits(halved_spacing, &region_a, splits);
-                b.compute_splits(halved_spacing, &region_b, splits);
+                a.compute_splits(spacing, &region_a, splits);
+                b.compute_splits(spacing, &region_b, splits);
             }
             Node::Pane(_) => {}
+        }
+    }
+}
+
+impl std::hash::Hash for Node {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Node::Split {
+                id,
+                axis,
+                ratio,
+                a,
+                b,
+            } => {
+                id.hash(state);
+                axis.hash(state);
+                ((ratio * 100_000.0) as u32).hash(state);
+                a.hash(state);
+                b.hash(state);
+            }
+            Node::Pane(pane) => {
+                pane.hash(state);
+            }
         }
     }
 }

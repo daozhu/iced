@@ -1,6 +1,5 @@
 use crate::{
-    input::keyboard,
-    pane_grid::{node::Node, Axis, Direction, Pane, Split},
+    pane_grid::{Axis, Configuration, Direction, Node, Pane, Split},
     Hasher, Point, Rectangle, Size,
 };
 
@@ -21,11 +20,10 @@ use std::collections::HashMap;
 /// [`Pane`]: struct.Pane.html
 /// [`Split`]: struct.Split.html
 /// [`State`]: struct.State.html
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct State<T> {
     pub(super) panes: HashMap<Pane, T>,
     pub(super) internal: Internal,
-    pub(super) modifiers: keyboard::ModifiersState,
 }
 
 /// The current focus of a [`Pane`].
@@ -53,23 +51,30 @@ impl<T> State<T> {
     /// [`State`]: struct.State.html
     /// [`Pane`]: struct.Pane.html
     pub fn new(first_pane_state: T) -> (Self, Pane) {
-        let first_pane = Pane(0);
-
-        let mut panes = HashMap::new();
-        let _ = panes.insert(first_pane, first_pane_state);
-
         (
-            State {
-                panes,
-                internal: Internal {
-                    layout: Node::Pane(first_pane),
-                    last_id: 0,
-                    action: Action::Idle { focus: None },
-                },
-                modifiers: keyboard::ModifiersState::default(),
-            },
-            first_pane,
+            Self::with_configuration(Configuration::Pane(first_pane_state)),
+            Pane(0),
         )
+    }
+
+    /// Creates a new [`State`] with the given [`Configuration`].
+    ///
+    /// [`State`]: struct.State.html
+    /// [`Configuration`]: enum.Configuration.html
+    pub fn with_configuration(config: impl Into<Configuration<T>>) -> Self {
+        let mut panes = HashMap::new();
+
+        let (layout, last_id) =
+            Self::distribute_content(&mut panes, config.into(), 0);
+
+        State {
+            panes,
+            internal: Internal {
+                layout,
+                last_id,
+                action: Action::Idle { focus: None },
+            },
+        }
     }
 
     /// Returns the total amount of panes in the [`State`].
@@ -80,6 +85,14 @@ impl<T> State<T> {
     }
 
     /// Returns the internal state of the given [`Pane`], if it exists.
+    ///
+    /// [`Pane`]: struct.Pane.html
+    pub fn get(&self, pane: &Pane) -> Option<&T> {
+        self.panes.get(pane)
+    }
+
+    /// Returns the internal state of the given [`Pane`] with mutability, if it
+    /// exists.
     ///
     /// [`Pane`]: struct.Pane.html
     pub fn get_mut(&mut self, pane: &Pane) -> Option<&mut T> {
@@ -100,6 +113,21 @@ impl<T> State<T> {
     /// [`State`]: struct.State.html
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&Pane, &mut T)> {
         self.panes.iter_mut()
+    }
+
+    /// Returns the layout of the [`State`].
+    ///
+    /// [`State`]: struct.State.html
+    pub fn layout(&self) -> &Node {
+        &self.internal.layout
+    }
+
+    /// Returns the focused [`Pane`] of the [`State`], if there is one.
+    ///
+    /// [`Pane`]: struct.Pane.html
+    /// [`State`]: struct.State.html
+    pub fn focused(&self) -> Option<Pane> {
+        self.internal.focused_pane()
     }
 
     /// Returns the active [`Pane`] of the [`State`], if there is one.
@@ -134,8 +162,10 @@ impl<T> State<T> {
     /// [`Pane`]: struct.Pane.html
     /// [`State::active`]: struct.State.html#method.active
     pub fn adjacent(&self, pane: &Pane, direction: Direction) -> Option<Pane> {
-        let regions =
-            self.internal.layout.regions(0.0, Size::new(4096.0, 4096.0));
+        let regions = self
+            .internal
+            .layout
+            .pane_regions(0.0, Size::new(4096.0, 4096.0));
 
         let current_region = regions.get(pane)?;
 
@@ -171,12 +201,24 @@ impl<T> State<T> {
         self.internal.focus(pane);
     }
 
+    /// Unfocuses the current focused [`Pane`].
+    ///
+    /// [`Pane`]: struct.Pane.html
+    pub fn unfocus(&mut self) {
+        self.internal.unfocus();
+    }
+
     /// Splits the given [`Pane`] into two in the given [`Axis`] and
     /// initializing the new [`Pane`] with the provided internal state.
     ///
     /// [`Pane`]: struct.Pane.html
     /// [`Axis`]: enum.Axis.html
-    pub fn split(&mut self, axis: Axis, pane: &Pane, state: T) -> Option<Pane> {
+    pub fn split(
+        &mut self,
+        axis: Axis,
+        pane: &Pane,
+        state: T,
+    ) -> Option<(Pane, Split)> {
         let node = self.internal.layout.find(pane)?;
 
         let new_pane = {
@@ -196,7 +238,7 @@ impl<T> State<T> {
         let _ = self.panes.insert(new_pane, state);
         self.focus(&new_pane);
 
-        Some(new_pane)
+        Some((new_pane, new_split))
     }
 
     /// Swaps the position of the provided panes in the [`State`].
@@ -246,22 +288,54 @@ impl<T> State<T> {
             None
         }
     }
+
+    fn distribute_content(
+        panes: &mut HashMap<Pane, T>,
+        content: Configuration<T>,
+        next_id: usize,
+    ) -> (Node, usize) {
+        match content {
+            Configuration::Split { axis, ratio, a, b } => {
+                let (a, next_id) = Self::distribute_content(panes, *a, next_id);
+                let (b, next_id) = Self::distribute_content(panes, *b, next_id);
+
+                (
+                    Node::Split {
+                        id: Split(next_id),
+                        axis,
+                        ratio,
+                        a: Box::new(a),
+                        b: Box::new(b),
+                    },
+                    next_id + 1,
+                )
+            }
+            Configuration::Pane(state) => {
+                let id = Pane(next_id);
+                let _ = panes.insert(id, state);
+
+                (Node::Pane(id), next_id + 1)
+            }
+        }
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Internal {
     layout: Node,
     last_id: usize,
     action: Action,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
     Idle {
         focus: Option<Pane>,
     },
     Dragging {
         pane: Pane,
+        origin: Point,
+        focus: Option<Pane>,
     },
     Resizing {
         split: Split,
@@ -276,7 +350,7 @@ impl Action {
             Action::Idle { focus } | Action::Resizing { focus, .. } => {
                 focus.map(|pane| (pane, Focus::Idle))
             }
-            Action::Dragging { pane } => Some((*pane, Focus::Dragging)),
+            Action::Dragging { pane, .. } => Some((*pane, Focus::Dragging)),
         }
     }
 }
@@ -286,6 +360,14 @@ impl Internal {
         self.action
     }
 
+    pub fn focused_pane(&self) -> Option<Pane> {
+        match self.action {
+            Action::Idle { focus } => focus,
+            Action::Dragging { focus, .. } => focus,
+            Action::Resizing { focus, .. } => focus,
+        }
+    }
+
     pub fn active_pane(&self) -> Option<Pane> {
         match self.action {
             Action::Idle { focus } => focus,
@@ -293,9 +375,9 @@ impl Internal {
         }
     }
 
-    pub fn picked_pane(&self) -> Option<Pane> {
+    pub fn picked_pane(&self) -> Option<(Pane, Point)> {
         match self.action {
-            Action::Dragging { pane } => Some(pane),
+            Action::Dragging { pane, origin, .. } => Some((pane, origin)),
             _ => None,
         }
     }
@@ -307,28 +389,34 @@ impl Internal {
         }
     }
 
-    pub fn regions(
+    pub fn pane_regions(
         &self,
         spacing: f32,
         size: Size,
     ) -> HashMap<Pane, Rectangle> {
-        self.layout.regions(spacing, size)
+        self.layout.pane_regions(spacing, size)
     }
 
-    pub fn splits(
+    pub fn split_regions(
         &self,
         spacing: f32,
         size: Size,
     ) -> HashMap<Split, (Axis, Rectangle, f32)> {
-        self.layout.splits(spacing, size)
+        self.layout.split_regions(spacing, size)
     }
 
     pub fn focus(&mut self, pane: &Pane) {
         self.action = Action::Idle { focus: Some(*pane) };
     }
 
-    pub fn pick_pane(&mut self, pane: &Pane) {
-        self.action = Action::Dragging { pane: *pane };
+    pub fn pick_pane(&mut self, pane: &Pane, origin: Point) {
+        let focus = self.focused_pane();
+
+        self.action = Action::Dragging {
+            pane: *pane,
+            origin,
+            focus,
+        };
     }
 
     pub fn pick_split(&mut self, split: &Split, axis: Axis) {

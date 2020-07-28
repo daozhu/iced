@@ -1,7 +1,7 @@
 //! Write some text for your users to read.
 use crate::{
-    layout, Color, Element, Font, Hasher, HorizontalAlignment, Layout, Length,
-    Point, Rectangle, Size, VerticalAlignment, Widget,
+    layout, Color, Element, Hasher, HorizontalAlignment, Layout, Length, Point,
+    Rectangle, Size, VerticalAlignment, Widget,
 };
 
 use std::hash::Hash;
@@ -11,7 +11,7 @@ use std::hash::Hash;
 /// # Example
 ///
 /// ```
-/// # use iced_native::Text;
+/// # type Text = iced_native::Text<iced_native::renderer::Null>;
 /// #
 /// Text::new("I <3 iced!")
 ///     .color([0.0, 0.0, 1.0])
@@ -19,19 +19,19 @@ use std::hash::Hash;
 /// ```
 ///
 /// ![Text drawn by `iced_wgpu`](https://github.com/hecrj/iced/blob/7760618fb112074bc40b148944521f312152012a/docs/images/text.png?raw=true)
-#[derive(Debug, Clone)]
-pub struct Text {
+#[derive(Debug)]
+pub struct Text<Renderer: self::Renderer> {
     content: String,
     size: Option<u16>,
     color: Option<Color>,
-    font: Font,
+    font: Renderer::Font,
     width: Length,
     height: Length,
     horizontal_alignment: HorizontalAlignment,
     vertical_alignment: VerticalAlignment,
 }
 
-impl Text {
+impl<Renderer: self::Renderer> Text<Renderer> {
     /// Create a new fragment of [`Text`] with the given contents.
     ///
     /// [`Text`]: struct.Text.html
@@ -40,7 +40,7 @@ impl Text {
             content: label.into(),
             size: None,
             color: None,
-            font: Font::Default,
+            font: Default::default(),
             width: Length::Shrink,
             height: Length::Shrink,
             horizontal_alignment: HorizontalAlignment::Left,
@@ -69,8 +69,8 @@ impl Text {
     ///
     /// [`Text`]: struct.Text.html
     /// [`Font`]: ../../struct.Font.html
-    pub fn font(mut self, font: Font) -> Self {
-        self.font = font;
+    pub fn font(mut self, font: impl Into<Renderer::Font>) -> Self {
+        self.font = font.into();
         self
     }
 
@@ -112,7 +112,7 @@ impl Text {
     }
 }
 
-impl<Message, Renderer> Widget<Message, Renderer> for Text
+impl<Message, Renderer> Widget<Message, Renderer> for Text<Renderer>
 where
     Renderer: self::Renderer,
 {
@@ -131,7 +131,7 @@ where
     ) -> layout::Node {
         let limits = limits.width(self.width).height(self.height);
 
-        let size = self.size.unwrap_or(Renderer::DEFAULT_SIZE);
+        let size = self.size.unwrap_or(renderer.default_size());
 
         let bounds = limits.max();
 
@@ -154,7 +154,7 @@ where
             defaults,
             layout.bounds(),
             &self.content,
-            self.size.unwrap_or(Renderer::DEFAULT_SIZE),
+            self.size.unwrap_or(renderer.default_size()),
             self.font,
             self.color,
             self.horizontal_alignment,
@@ -163,7 +163,8 @@ where
     }
 
     fn hash_layout(&self, state: &mut Hasher) {
-        std::any::TypeId::of::<Text>().hash(state);
+        struct Marker;
+        std::any::TypeId::of::<Marker>().hash(state);
 
         self.content.hash(state);
         self.size.hash(state);
@@ -181,10 +182,15 @@ where
 /// [renderer]: ../../renderer/index.html
 /// [`UserInterface`]: ../../struct.UserInterface.html
 pub trait Renderer: crate::Renderer {
-    /// The default size of [`Text`].
+    /// The font type used for [`Text`].
     ///
     /// [`Text`]: struct.Text.html
-    const DEFAULT_SIZE: u16;
+    type Font: Default + Copy;
+
+    /// Returns the default size of [`Text`].
+    ///
+    /// [`Text`]: struct.Text.html
+    fn default_size(&self) -> u16;
 
     /// Measures the [`Text`] in the given bounds and returns the minimum
     /// boundaries that can fit the contents.
@@ -194,7 +200,7 @@ pub trait Renderer: crate::Renderer {
         &self,
         content: &str,
         size: u16,
-        font: Font,
+        font: Self::Font,
         bounds: Size,
     ) -> (f32, f32);
 
@@ -217,18 +223,34 @@ pub trait Renderer: crate::Renderer {
         bounds: Rectangle,
         content: &str,
         size: u16,
-        font: Font,
+        font: Self::Font,
         color: Option<Color>,
         horizontal_alignment: HorizontalAlignment,
         vertical_alignment: VerticalAlignment,
     ) -> Self::Output;
 }
 
-impl<'a, Message, Renderer> From<Text> for Element<'a, Message, Renderer>
+impl<'a, Message, Renderer> From<Text<Renderer>>
+    for Element<'a, Message, Renderer>
 where
-    Renderer: self::Renderer,
+    Renderer: self::Renderer + 'a,
 {
-    fn from(text: Text) -> Element<'a, Message, Renderer> {
+    fn from(text: Text<Renderer>) -> Element<'a, Message, Renderer> {
         Element::new(text)
+    }
+}
+
+impl<Renderer: self::Renderer> Clone for Text<Renderer> {
+    fn clone(&self) -> Self {
+        Self {
+            content: self.content.clone(),
+            size: self.size,
+            color: self.color,
+            font: self.font,
+            width: self.width,
+            height: self.height,
+            horizontal_alignment: self.horizontal_alignment,
+            vertical_alignment: self.vertical_alignment,
+        }
     }
 }

@@ -1,19 +1,22 @@
 //! Draw meshes of triangles.
 use crate::{settings, Transformation};
-use iced_native::{Point, Rectangle};
+use iced_graphics::layer;
 use std::mem;
 use zerocopy::AsBytes;
+
+pub use iced_graphics::triangle::{Mesh2D, Vertex2D};
 
 mod msaa;
 
 const UNIFORM_BUFFER_SIZE: usize = 100;
-const VERTEX_BUFFER_SIZE: usize = 100_000;
-const INDEX_BUFFER_SIZE: usize = 100_000;
+const VERTEX_BUFFER_SIZE: usize = 10_000;
+const INDEX_BUFFER_SIZE: usize = 10_000;
 
 #[derive(Debug)]
 pub(crate) struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     blit: Option<msaa::Blit>,
+    constants_layout: wgpu::BindGroupLayout,
     constants: wgpu::BindGroup,
     uniforms_buffer: Buffer<Uniforms>,
     vertex_buffer: Buffer<Vertex2D>,
@@ -48,8 +51,10 @@ impl<T> Buffer<T> {
         }
     }
 
-    pub fn ensure_capacity(&mut self, device: &wgpu::Device, size: usize) {
-        if self.size < size {
+    pub fn expand(&mut self, device: &wgpu::Device, size: usize) -> bool {
+        let needs_resize = self.size < size;
+
+        if needs_resize {
             self.raw = device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
                 size: (std::mem::size_of::<T>() * size) as u64,
@@ -58,6 +63,8 @@ impl<T> Buffer<T> {
 
             self.size = size;
         }
+
+        needs_resize
     }
 }
 
@@ -67,7 +74,7 @@ impl Pipeline {
         format: wgpu::TextureFormat,
         antialiasing: Option<settings::Antialiasing>,
     ) -> Pipeline {
-        let constant_layout =
+        let constants_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: None,
                 bindings: &[wgpu::BindGroupLayoutEntry {
@@ -86,7 +93,7 @@ impl Pipeline {
         let constant_bind_group =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &constant_layout,
+                layout: &constants_layout,
                 bindings: &[wgpu::Binding {
                     binding: 0,
                     resource: wgpu::BindingResource::Buffer {
@@ -98,7 +105,7 @@ impl Pipeline {
 
         let layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                bind_group_layouts: &[&constant_layout],
+                bind_group_layouts: &[&constants_layout],
             });
 
         let vs = include_bytes!("shader/triangle.vert.spv");
@@ -168,9 +175,9 @@ impl Pipeline {
                         ],
                     }],
                 },
-                sample_count: antialiasing
-                    .map(|a| a.sample_count())
-                    .unwrap_or(1),
+                sample_count: u32::from(
+                    antialiasing.map(|a| a.sample_count()).unwrap_or(1),
+                ),
                 sample_mask: !0,
                 alpha_to_coverage_enabled: false,
             });
@@ -178,6 +185,7 @@ impl Pipeline {
         Pipeline {
             pipeline,
             blit: antialiasing.map(|a| msaa::Blit::new(device, format, a)),
+            constants_layout,
             constants: constant_bind_group,
             uniforms_buffer: constants_buffer,
             vertex_buffer: Buffer::new(
@@ -201,24 +209,42 @@ impl Pipeline {
         target_width: u32,
         target_height: u32,
         transformation: Transformation,
-        meshes: &[(Point, &Mesh2D)],
-        bounds: Rectangle<u32>,
+        scale_factor: f32,
+        meshes: &[layer::Mesh<'_>],
     ) {
         // This looks a bit crazy, but we are just counting how many vertices
         // and indices we will need to handle.
         // TODO: Improve readability
         let (total_vertices, total_indices) = meshes
             .iter()
-            .map(|(_, mesh)| (mesh.vertices.len(), mesh.indices.len()))
+            .map(|layer::Mesh { buffers, .. }| {
+                (buffers.vertices.len(), buffers.indices.len())
+            })
             .fold((0, 0), |(total_v, total_i), (v, i)| {
                 (total_v + v, total_i + i)
             });
 
         // Then we ensure the current buffers are big enough, resizing if
         // necessary
-        self.uniforms_buffer.ensure_capacity(device, meshes.len());
-        self.vertex_buffer.ensure_capacity(device, total_vertices);
-        self.index_buffer.ensure_capacity(device, total_indices);
+        let _ = self.vertex_buffer.expand(device, total_vertices);
+        let _ = self.index_buffer.expand(device, total_indices);
+
+        // If the uniforms buffer is resized, then we need to recreate its
+        // bind group.
+        if self.uniforms_buffer.expand(device, meshes.len()) {
+            self.constants =
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &self.constants_layout,
+                    bindings: &[wgpu::Binding {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer {
+                            buffer: &self.uniforms_buffer.raw,
+                            range: 0..std::mem::size_of::<Uniforms>() as u64,
+                        },
+                    }],
+                });
+        }
 
         let mut uniforms: Vec<Uniforms> = Vec::with_capacity(meshes.len());
         let mut offsets: Vec<(
@@ -230,20 +256,18 @@ impl Pipeline {
         let mut last_index = 0;
 
         // We upload everything upfront
-        for (origin, mesh) in meshes {
-            let transform = Uniforms {
-                transform: (transformation
-                    * Transformation::translate(origin.x, origin.y))
-                .into(),
-            };
+        for mesh in meshes {
+            let transform = (transformation
+                * Transformation::translate(mesh.origin.x, mesh.origin.y))
+            .into();
 
             let vertex_buffer = device.create_buffer_with_data(
-                mesh.vertices.as_bytes(),
+                bytemuck::cast_slice(&mesh.buffers.vertices),
                 wgpu::BufferUsage::COPY_SRC,
             );
 
             let index_buffer = device.create_buffer_with_data(
-                mesh.indices.as_bytes(),
+                mesh.buffers.indices.as_bytes(),
                 wgpu::BufferUsage::COPY_SRC,
             );
 
@@ -252,7 +276,8 @@ impl Pipeline {
                 0,
                 &self.vertex_buffer.raw,
                 (std::mem::size_of::<Vertex2D>() * last_vertex) as u64,
-                (std::mem::size_of::<Vertex2D>() * mesh.vertices.len()) as u64,
+                (std::mem::size_of::<Vertex2D>() * mesh.buffers.vertices.len())
+                    as u64,
             );
 
             encoder.copy_buffer_to_buffer(
@@ -260,18 +285,19 @@ impl Pipeline {
                 0,
                 &self.index_buffer.raw,
                 (std::mem::size_of::<u32>() * last_index) as u64,
-                (std::mem::size_of::<u32>() * mesh.indices.len()) as u64,
+                (std::mem::size_of::<u32>() * mesh.buffers.indices.len())
+                    as u64,
             );
 
             uniforms.push(transform);
             offsets.push((
                 last_vertex as u64,
                 last_index as u64,
-                mesh.indices.len(),
+                mesh.buffers.indices.len(),
             ));
 
-            last_vertex += mesh.vertices.len();
-            last_index += mesh.indices.len();
+            last_vertex += mesh.buffers.vertices.len();
+            last_index += mesh.buffers.indices.len();
         }
 
         let uniforms_buffer = device.create_buffer_with_data(
@@ -318,16 +344,19 @@ impl Pipeline {
                 });
 
             render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_scissor_rect(
-                bounds.x,
-                bounds.y,
-                bounds.width,
-                bounds.height,
-            );
 
             for (i, (vertex_offset, index_offset, indices)) in
                 offsets.into_iter().enumerate()
             {
+                let clip_bounds = (meshes[i].clip_bounds * scale_factor).snap();
+
+                render_pass.set_scissor_rect(
+                    clip_bounds.x,
+                    clip_bounds.y,
+                    clip_bounds.width,
+                    clip_bounds.height,
+                );
+
                 render_pass.set_bind_group(
                     0,
                     &self.constants,
@@ -361,35 +390,28 @@ impl Pipeline {
 #[derive(Debug, Clone, Copy, AsBytes)]
 struct Uniforms {
     transform: [f32; 16],
+    // We need to align this to 256 bytes to please `wgpu`...
+    // TODO: Be smarter and stop wasting memory!
+    _padding_a: [f32; 32],
+    _padding_b: [f32; 16],
 }
 
 impl Default for Uniforms {
     fn default() -> Self {
         Self {
             transform: *Transformation::identity().as_ref(),
+            _padding_a: [0.0; 32],
+            _padding_b: [0.0; 16],
         }
     }
 }
 
-/// A two-dimensional vertex with some color in __linear__ RGBA.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, AsBytes)]
-pub struct Vertex2D {
-    /// The vertex position
-    pub position: [f32; 2],
-    /// The vertex color in __linear__ RGBA.
-    pub color: [f32; 4],
-}
-
-/// A set of [`Vertex2D`] and indices representing a list of triangles.
-///
-/// [`Vertex2D`]: struct.Vertex2D.html
-#[derive(Clone, Debug)]
-pub struct Mesh2D {
-    /// The vertices of the mesh
-    pub vertices: Vec<Vertex2D>,
-    /// The list of vertex indices that defines the triangles of the mesh.
-    ///
-    /// Therefore, this list should always have a length that is a multiple of 3.
-    pub indices: Vec<u32>,
+impl From<Transformation> for Uniforms {
+    fn from(transformation: Transformation) -> Uniforms {
+        Self {
+            transform: transformation.into(),
+            _padding_a: [0.0; 32],
+            _padding_b: [0.0; 16],
+        }
+    }
 }

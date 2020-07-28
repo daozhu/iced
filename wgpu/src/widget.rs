@@ -7,10 +7,13 @@
 //! ```
 //! use iced_wgpu::{button, Button};
 //! ```
+use crate::Renderer;
+
 pub mod button;
 pub mod checkbox;
 pub mod container;
 pub mod pane_grid;
+pub mod pick_list;
 pub mod progress_bar;
 pub mod radio;
 pub mod scrollable;
@@ -25,6 +28,8 @@ pub use checkbox::Checkbox;
 pub use container::Container;
 #[doc(no_inline)]
 pub use pane_grid::PaneGrid;
+#[doc(no_inline)]
+pub use pick_list::PickList;
 #[doc(no_inline)]
 pub use progress_bar::ProgressBar;
 #[doc(no_inline)]
@@ -43,3 +48,14 @@ pub mod canvas;
 #[cfg(feature = "canvas")]
 #[doc(no_inline)]
 pub use canvas::Canvas;
+
+pub use iced_native::Space;
+
+/// A container that distributes its contents vertically.
+pub type Column<'a, Message> = iced_native::Column<'a, Message, Renderer>;
+
+/// A container that distributes its contents horizontally.
+pub type Row<'a, Message> = iced_native::Row<'a, Message, Renderer>;
+
+/// A paragraph of text.
+pub type Text = iced_native::Text<Renderer>;

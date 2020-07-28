@@ -15,13 +15,10 @@ pub use value::Value;
 use editor::Editor;
 
 use crate::{
-    input::{
-        keyboard,
-        mouse::{self, click},
-        ButtonState,
-    },
-    layout, Clipboard, Element, Event, Font, Hasher, Layout, Length, Point,
-    Rectangle, Size, Widget,
+    keyboard, layout,
+    mouse::{self, click},
+    text, Clipboard, Element, Event, Hasher, Layout, Length, Point, Rectangle,
+    Size, Widget,
 };
 
 use std::u32;
@@ -56,7 +53,7 @@ pub struct TextInput<'a, Message, Renderer: self::Renderer> {
     placeholder: String,
     value: Value,
     is_secure: bool,
-    font: Font,
+    font: Renderer::Font,
     width: Length,
     max_width: u32,
     padding: u16,
@@ -91,7 +88,7 @@ impl<'a, Message, Renderer: self::Renderer> TextInput<'a, Message, Renderer> {
             placeholder: String::from(placeholder),
             value: Value::new(value),
             is_secure: false,
-            font: Font::Default,
+            font: Default::default(),
             width: Length::Fill,
             max_width: u32::MAX,
             padding: 0,
@@ -114,7 +111,7 @@ impl<'a, Message, Renderer: self::Renderer> TextInput<'a, Message, Renderer> {
     ///
     /// [`Text`]: struct.Text.html
     /// [`Font`]: ../../struct.Font.html
-    pub fn font(mut self, font: Font) -> Self {
+    pub fn font(mut self, font: Renderer::Font) -> Self {
         self.font = font;
         self
     }
@@ -166,6 +163,13 @@ impl<'a, Message, Renderer: self::Renderer> TextInput<'a, Message, Renderer> {
         self.style = style.into();
         self
     }
+
+    /// Returns the current [`State`] of the [`TextInput`].
+    ///
+    /// [`TextInput`]: struct.TextInput.html
+    pub fn state(&self) -> &State {
+        self.state
+    }
 }
 
 impl<'a, Message, Renderer> Widget<Message, Renderer>
@@ -212,10 +216,7 @@ where
         clipboard: Option<&dyn Clipboard>,
     ) {
         match event {
-            Event::Mouse(mouse::Event::Input {
-                button: mouse::Button::Left,
-                state: ButtonState::Pressed,
-            }) => {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let is_clicked = layout.bounds().contains(cursor_position);
 
                 if is_clicked {
@@ -280,10 +281,7 @@ where
                 self.state.is_dragging = is_clicked;
                 self.state.is_focused = is_clicked;
             }
-            Event::Mouse(mouse::Event::Input {
-                button: mouse::Button::Left,
-                state: ButtonState::Released,
-            }) => {
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 self.state.is_dragging = false;
             }
             Event::Mouse(mouse::Event::CursorMoved { x, .. }) => {
@@ -327,9 +325,8 @@ where
                 let message = (self.on_change)(editor.contents());
                 messages.push(message);
             }
-            Event::Keyboard(keyboard::Event::Input {
+            Event::Keyboard(keyboard::Event::KeyPressed {
                 key_code,
-                state: ButtonState::Pressed,
                 modifiers,
             }) if self.state.is_focused => match key_code {
                 keyboard::KeyCode::Enter => {
@@ -339,7 +336,7 @@ where
                 }
                 keyboard::KeyCode::Backspace => {
                     if platform::is_jump_modifier_pressed(modifiers)
-                        && self.state.cursor.selection().is_none()
+                        && self.state.cursor.selection(&self.value).is_none()
                     {
                         if self.is_secure {
                             let cursor_pos = self.state.cursor.end(&self.value);
@@ -359,7 +356,7 @@ where
                 }
                 keyboard::KeyCode::Delete => {
                     if platform::is_jump_modifier_pressed(modifiers)
-                        && self.state.cursor.selection().is_none()
+                        && self.state.cursor.selection(&self.value).is_none()
                     {
                         if self.is_secure {
                             let cursor_pos = self.state.cursor.end(&self.value);
@@ -473,10 +470,8 @@ where
                 }
                 _ => {}
             },
-            Event::Keyboard(keyboard::Event::Input {
-                key_code,
-                state: ButtonState::Released,
-                ..
+            Event::Keyboard(keyboard::Event::KeyReleased {
+                key_code, ..
             }) => match key_code {
                 keyboard::KeyCode::V => {
                     self.state.is_pasting = None;
@@ -498,7 +493,8 @@ where
         let text_bounds = layout.children().next().unwrap().bounds();
 
         if self.is_secure {
-            renderer.draw(
+            self::Renderer::draw(
+                renderer,
                 bounds,
                 text_bounds,
                 cursor_position,
@@ -510,7 +506,8 @@ where
                 &self.style,
             )
         } else {
-            renderer.draw(
+            self::Renderer::draw(
+                renderer,
                 bounds,
                 text_bounds,
                 cursor_position,
@@ -543,19 +540,14 @@ where
 ///
 /// [`TextInput`]: struct.TextInput.html
 /// [renderer]: ../../renderer/index.html
-pub trait Renderer: crate::Renderer + Sized {
+pub trait Renderer: text::Renderer + Sized {
     /// The style supported by this renderer.
     type Style: Default;
-
-    /// Returns the default size of the text of the [`TextInput`].
-    ///
-    /// [`TextInput`]: struct.TextInput.html
-    fn default_size(&self) -> u16;
 
     /// Returns the width of the value of the [`TextInput`].
     ///
     /// [`TextInput`]: struct.TextInput.html
-    fn measure_value(&self, value: &str, size: u16, font: Font) -> f32;
+    fn measure_value(&self, value: &str, size: u16, font: Self::Font) -> f32;
 
     /// Returns the current horizontal offset of the value of the
     /// [`TextInput`].
@@ -568,7 +560,7 @@ pub trait Renderer: crate::Renderer + Sized {
     fn offset(
         &self,
         text_bounds: Rectangle,
-        font: Font,
+        font: Self::Font,
         size: u16,
         value: &Value,
         state: &State,
@@ -592,7 +584,7 @@ pub trait Renderer: crate::Renderer + Sized {
         bounds: Rectangle,
         text_bounds: Rectangle,
         cursor_position: Point,
-        font: Font,
+        font: Self::Font,
         size: u16,
         placeholder: &str,
         value: &Value,
@@ -607,7 +599,7 @@ pub trait Renderer: crate::Renderer + Sized {
     fn find_cursor_position(
         &self,
         text_bounds: Rectangle,
-        font: Font,
+        font: Self::Font,
         size: Option<u16>,
         value: &Value,
         state: &State,
@@ -690,13 +682,37 @@ impl State {
     pub fn cursor(&self) -> Cursor {
         self.cursor
     }
+
+    /// Moves the [`Cursor`] of the [`TextInput`] to the front of the input text.
+    ///
+    /// [`Cursor`]: struct.Cursor.html
+    /// [`TextInput`]: struct.TextInput.html
+    pub fn move_cursor_to_front(&mut self) {
+        self.cursor.move_to(0);
+    }
+
+    /// Moves the [`Cursor`] of the [`TextInput`] to the end of the input text.
+    ///
+    /// [`Cursor`]: struct.Cursor.html
+    /// [`TextInput`]: struct.TextInput.html
+    pub fn move_cursor_to_end(&mut self) {
+        self.cursor.move_to(usize::MAX);
+    }
+
+    /// Moves the [`Cursor`] of the [`TextInput`] to an arbitrary location.
+    ///
+    /// [`Cursor`]: struct.Cursor.html
+    /// [`TextInput`]: struct.TextInput.html
+    pub fn move_cursor_to(&mut self, position: usize) {
+        self.cursor.move_to(position);
+    }
 }
 
 // TODO: Reduce allocations
 fn find_cursor_position<Renderer: self::Renderer>(
     renderer: &Renderer,
     value: &Value,
-    font: Font,
+    font: Renderer::Font,
     size: u16,
     target: f32,
     start: usize,
@@ -749,7 +765,7 @@ fn find_cursor_position<Renderer: self::Renderer>(
 }
 
 mod platform {
-    use crate::input::keyboard;
+    use crate::keyboard;
 
     pub fn is_jump_modifier_pressed(
         modifiers: keyboard::ModifiersState,

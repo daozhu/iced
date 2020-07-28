@@ -1,38 +1,149 @@
+use url::Url;
+
 use iced::{
-    button, executor, Align, Application, Button, Column, Command, Container,
-    Element, Length, ProgressBar, Settings, Subscription, Text,
+    button, scrollable, Align, Application, Button, Column, Command, Container,
+    Element, HorizontalAlignment, Length, ProgressBar, Row, Scrollable,
+    Settings, Space, Subscription, Text,
 };
+
+use crate::download::{Download, Progress};
 
 mod download;
 
-pub fn main() {
-    Example::run(Settings::default())
+const FILE_URL: &str = "https://speed.hetzner.de/100MB.bin";
+
+enum Example {
+    Loaded(State),
 }
 
-#[derive(Debug)]
-enum Example {
-    Idle { button: button::State },
-    Downloading { progress: f32 },
-    Finished { button: button::State },
-    Errored { button: button::State },
+#[derive(Debug, Clone, Default)]
+struct Task {
+    name: String,
+    url: String,
+    button: button::State,
+    state: TaskState,
+}
+
+#[derive(Debug, Clone, Default)]
+struct State {
+    tasks: Vec<Task>,
+    scrollable: scrollable::State,
 }
 
 #[derive(Debug, Clone)]
-pub enum Message {
-    Download,
-    DownloadProgressed(download::Progress),
+struct Message {
+    url: String,
+    download_message: DownloadMessage,
+}
+
+impl Message {
+    fn from(url: String, download_message: DownloadMessage) -> Self {
+        Message {
+            url,
+            download_message,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum DownloadMessage {
+    StartDownload,
+    CancelDownload,
+    DownloadProgressed(Progress),
+}
+
+#[derive(Debug, Clone)]
+enum TaskState {
+    Idle,
+    Downloading(f32),
+    Finished,
+    Error,
+}
+
+impl Default for TaskState {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+impl Task {
+    fn view(&mut self) -> Element<Message> {
+        let download_text = |text| {
+            Text::new(text)
+                .size(15)
+                .horizontal_alignment(HorizontalAlignment::Center)
+        };
+        Row::new()
+            .spacing(20)
+            .align_items(Align::Center)
+            .push(Text::new(&self.name))
+            .push(match self.state {
+                TaskState::Downloading(progress) => {
+                    ProgressBar::new(0.0..=100.0, progress)
+                        .width(Length::Units(150))
+                        .height(Length::Units(18))
+                        .into()
+                }
+                _ => {
+                    let element: Element<_> =
+                        Space::new(Length::Units(150), Length::Shrink).into();
+                    element
+                }
+            })
+            .push(
+                match self.state {
+                    TaskState::Idle => {
+                        Button::new(&mut self.button, download_text("Download"))
+                            .on_press(Message::from(
+                                (*self.url).to_string(),
+                                DownloadMessage::StartDownload,
+                            ))
+                    }
+                    TaskState::Downloading(progress) => Button::new(
+                        &mut self.button,
+                        download_text(&format!("{:.2}%", progress)),
+                    )
+                    .on_press(Message::from(
+                        (*self.url).to_string(),
+                        DownloadMessage::CancelDownload,
+                    )),
+                    TaskState::Finished => Button::new(
+                        &mut self.button,
+                        download_text("Downloaded"),
+                    ),
+                    TaskState::Error => {
+                        Button::new(&mut self.button, download_text("Errored"))
+                            .on_press(Message::from(
+                                (*self.url).to_string(),
+                                DownloadMessage::StartDownload,
+                            ))
+                    }
+                }
+                .width(Length::Units(85)),
+            )
+            .into()
+    }
 }
 
 impl Application for Example {
-    type Executor = executor::Default;
+    type Executor = iced::executor::Default;
     type Message = Message;
     type Flags = ();
 
     fn new(_flags: ()) -> (Example, Command<Message>) {
+        let tasks: Vec<_> = (1..=10)
+            .map(|n| Task {
+                name: format!("File {:0>2}", n),
+                url: format!("{}?{}", FILE_URL, n),
+                ..Task::default()
+            })
+            .collect();
+
         (
-            Example::Idle {
-                button: button::State::new(),
-            },
+            Example::Loaded(State {
+                tasks,
+                ..State::default()
+            }),
             Command::none(),
         )
     }
@@ -41,104 +152,89 @@ impl Application for Example {
         String::from("Download progress - Iced")
     }
 
-    fn update(&mut self, message: Message) -> Command<Message> {
-        match message {
-            Message::Download => match self {
-                Example::Idle { .. }
-                | Example::Finished { .. }
-                | Example::Errored { .. } => {
-                    *self = Example::Downloading { progress: 0.0 };
-                }
-                _ => {}
-            },
-            Message::DownloadProgressed(message) => match self {
-                Example::Downloading { progress } => match message {
-                    download::Progress::Started => {
-                        *progress = 0.0;
-                    }
-                    download::Progress::Advanced(percentage) => {
-                        *progress = percentage;
-                    }
-                    download::Progress::Finished => {
-                        *self = Example::Finished {
-                            button: button::State::new(),
+    fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
+        match self {
+            Example::Loaded(State { tasks, .. }) => {
+                let url = message.url;
+                if let Some(task) = tasks.iter_mut().find(|t| t.url == url) {
+                    match message.download_message {
+                        DownloadMessage::StartDownload => {
+                            task.state = TaskState::Downloading(0f32);
+                        }
+                        DownloadMessage::DownloadProgressed(progress) => {
+                            if let TaskState::Downloading(p) = &mut task.state {
+                                match progress {
+                                    Progress::Started => *p = 0.0,
+                                    Progress::Advanced(percentage) => {
+                                        *p = percentage
+                                    }
+                                    Progress::Finished(_bytes) => {
+                                        task.state = TaskState::Finished;
+                                    }
+                                    Progress::Errored => {
+                                        task.state = TaskState::Error;
+                                    }
+                                }
+                            }
+                        }
+                        DownloadMessage::CancelDownload => {
+                            task.state = TaskState::Idle;
                         }
                     }
-                    download::Progress::Errored => {
-                        *self = Example::Errored {
-                            button: button::State::new(),
-                        };
-                    }
-                },
-                _ => {}
-            },
-        };
-
+                }
+            }
+        }
         Command::none()
     }
 
-    fn subscription(&self) -> Subscription<Message> {
+    fn subscription(&self) -> Subscription<Self::Message> {
         match self {
-            Example::Downloading { .. } => {
-                download::file("https://speed.hetzner.de/100MB.bin")
-                    .map(Message::DownloadProgressed)
+            Example::Loaded(State { tasks, .. }) => {
+                Subscription::batch(tasks.iter().map(|task| file(&task.url)))
             }
-            _ => Subscription::none(),
         }
     }
 
-    fn view(&mut self) -> Element<Message> {
-        let current_progress = match self {
-            Example::Idle { .. } => 0.0,
-            Example::Downloading { progress } => *progress,
-            Example::Finished { .. } => 100.0,
-            Example::Errored { .. } => 0.0,
-        };
-
-        let progress_bar = ProgressBar::new(0.0..=100.0, current_progress);
-
-        let control: Element<_> = match self {
-            Example::Idle { button } => {
-                Button::new(button, Text::new("Start the download!"))
-                    .on_press(Message::Download)
+    fn view(&mut self) -> Element<Self::Message> {
+        match self {
+            Example::Loaded(State {
+                tasks, scrollable, ..
+            }) => {
+                let list = tasks.iter_mut().fold(
+                    Column::new()
+                        .width(Length::Fill)
+                        .spacing(20)
+                        .align_items(Align::Center),
+                    |column, task| column.push(task.view()),
+                );
+                Container::new(
+                    Scrollable::new(scrollable).padding(40).spacing(40).align_items(Align::Center)
+                        .push(Text::new("Download multiple files asynchronously, click again to cancel the download task.")
+                            .horizontal_alignment(HorizontalAlignment::Center)
+                            .width(Length::Units(400)))
+                        .push(list),
+                )
+                    .width(Length::Fill)
+                    .center_x()
                     .into()
             }
-            Example::Finished { button } => Column::new()
-                .spacing(10)
-                .align_items(Align::Center)
-                .push(Text::new("Download finished!"))
-                .push(
-                    Button::new(button, Text::new("Start again"))
-                        .on_press(Message::Download),
-                )
-                .into(),
-            Example::Downloading { .. } => {
-                Text::new(format!("Downloading... {:.2}%", current_progress))
-                    .into()
-            }
-            Example::Errored { button } => Column::new()
-                .spacing(10)
-                .align_items(Align::Center)
-                .push(Text::new("Something went wrong :("))
-                .push(
-                    Button::new(button, Text::new("Try again"))
-                        .on_press(Message::Download),
-                )
-                .into(),
-        };
-
-        let content = Column::new()
-            .spacing(10)
-            .padding(10)
-            .align_items(Align::Center)
-            .push(progress_bar)
-            .push(control);
-
-        Container::new(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x()
-            .center_y()
-            .into()
+        }
     }
+}
+
+// Just a little utility function
+fn file<T: ToString>(url: T) -> iced::Subscription<Message> {
+    iced::Subscription::from_recipe(Download {
+        url: Url::parse(&url.to_string()).unwrap(),
+    })
+    .map(|(url, progress)| {
+        Message::from(
+            url.as_str().to_string(),
+            DownloadMessage::DownloadProgressed(progress),
+        )
+    })
+}
+
+fn main() {
+    Example::run(Settings::default());
 }

@@ -1,14 +1,23 @@
-use iced_futures::futures;
+use std::hash::Hash;
 
-// Just a little utility function
-pub fn file<T: ToString>(url: T) -> iced::Subscription<Progress> {
-    iced::Subscription::from_recipe(Download {
-        url: url.to_string(),
-    })
-}
+use bytes::BufMut;
+use futures_util::stream::{self, BoxStream};
+use reqwest;
+use url::Url;
 
 pub struct Download {
-    url: String,
+    pub url: Url,
+}
+
+pub enum State {
+    Ready(Url),
+    Downloading {
+        url: Url,
+        response: reqwest::Response,
+        total: u64,
+        bytes: Vec<u8>,
+    },
+    Finished,
 }
 
 // Make sure iced can use our download stream
@@ -16,80 +25,75 @@ impl<H, I> iced_native::subscription::Recipe<H, I> for Download
 where
     H: std::hash::Hasher,
 {
-    type Output = Progress;
+    type Output = (Url, Progress);
 
     fn hash(&self, state: &mut H) {
-        use std::hash::Hash;
-
         std::any::TypeId::of::<Self>().hash(state);
         self.url.hash(state);
     }
 
     fn stream(
         self: Box<Self>,
-        _input: futures::stream::BoxStream<'static, I>,
-    ) -> futures::stream::BoxStream<'static, Self::Output> {
-        Box::pin(futures::stream::unfold(
-            State::Ready(self.url),
-            |state| async move {
-                match state {
-                    State::Ready(url) => {
-                        let response = reqwest::get(&url).await;
-
-                        match response {
-                            Ok(response) => {
-                                if let Some(total) = response.content_length() {
-                                    Some((
-                                        Progress::Started,
-                                        State::Downloading {
-                                            response,
-                                            total,
-                                            downloaded: 0,
-                                        },
-                                    ))
-                                } else {
-                                    Some((Progress::Errored, State::Finished))
-                                }
-                            }
-                            Err(_) => {
-                                Some((Progress::Errored, State::Finished))
-                            }
-                        }
-                    }
-                    State::Downloading {
-                        mut response,
-                        total,
-                        downloaded,
-                    } => match response.chunk().await {
-                        Ok(Some(chunk)) => {
-                            let downloaded = downloaded + chunk.len() as u64;
-
-                            let percentage =
-                                (downloaded as f32 / total as f32) * 100.0;
-
+        _input: BoxStream<'static, I>,
+    ) -> BoxStream<'static, Self::Output> {
+        Box::pin(stream::unfold(State::Ready(self.url), |state| async move {
+            match state {
+                State::Ready(url) => match reqwest::get(url.as_str()).await {
+                    Ok(response) => {
+                        if let Some(total) = response.content_length() {
                             Some((
-                                Progress::Advanced(percentage),
+                                (url.clone(), Progress::Started),
                                 State::Downloading {
+                                    url,
                                     response,
                                     total,
-                                    downloaded,
+                                    bytes: vec![],
                                 },
                             ))
+                        } else {
+                            Some(((url, Progress::Errored), State::Finished))
                         }
-                        Ok(None) => Some((Progress::Finished, State::Finished)),
-                        Err(_) => Some((Progress::Errored, State::Finished)),
-                    },
-                    State::Finished => {
-                        // We do not let the stream die, as it would start a
-                        // new download repeatedly if the user is not careful
-                        // in case of errors.
-                        let _: () = iced::futures::future::pending().await;
-
-                        None
                     }
+                    Err(_) => Some(((url, Progress::Errored), State::Finished)),
+                },
+                State::Downloading {
+                    url,
+                    mut response,
+                    total,
+                    mut bytes,
+                } => match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        let downloaded =
+                            bytes.len() as u64 + chunk.len() as u64;
+                        let percentage =
+                            (downloaded as f32 / total as f32) * 100.0;
+                        bytes.put(chunk);
+                        Some((
+                            (url.clone(), Progress::Advanced(percentage)),
+                            State::Downloading {
+                                url,
+                                response,
+                                total,
+                                bytes,
+                            },
+                        ))
+                    }
+                    Ok(None) => Some((
+                        (url, Progress::Finished(bytes)),
+                        State::Finished,
+                    )),
+                    Err(_) => Some(((url, Progress::Errored), State::Finished)),
+                },
+                State::Finished => {
+                    // We do not let the stream die, as it would start a
+                    // new download repeatedly if the user is not careful
+                    // in case of errors.
+                    iced::futures::future::pending::<()>().await;
+
+                    None
                 }
-            },
-        ))
+            }
+        }))
     }
 }
 
@@ -97,16 +101,6 @@ where
 pub enum Progress {
     Started,
     Advanced(f32),
-    Finished,
+    Finished(Vec<u8>),
     Errored,
-}
-
-pub enum State {
-    Ready(String),
-    Downloading {
-        response: reqwest::Response,
-        total: u64,
-        downloaded: u64,
-    },
-    Finished,
 }

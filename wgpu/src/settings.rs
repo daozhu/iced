@@ -1,6 +1,5 @@
-//! Configure a [`Renderer`].
-//!
-//! [`Renderer`]: struct.Renderer.html
+//! Configure a renderer.
+pub use crate::Antialiasing;
 
 /// The settings of a [`Renderer`].
 ///
@@ -17,6 +16,11 @@ pub struct Settings {
     /// If `None` is provided, a default system font will be chosen.
     pub default_font: Option<&'static [u8]>,
 
+    /// The default size of text.
+    ///
+    /// By default, it will be set to 20.
+    pub default_text_size: u16,
+
     /// The antialiasing strategy that will be used for triangle primitives.
     pub antialiasing: Option<Antialiasing>,
 }
@@ -26,31 +30,8 @@ impl Default for Settings {
         Settings {
             format: wgpu::TextureFormat::Bgra8UnormSrgb,
             default_font: None,
+            default_text_size: 20,
             antialiasing: None,
-        }
-    }
-}
-
-/// An antialiasing strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Antialiasing {
-    /// Multisample AA with 2 samples
-    MSAAx2,
-    /// Multisample AA with 4 samples
-    MSAAx4,
-    /// Multisample AA with 8 samples
-    MSAAx8,
-    /// Multisample AA with 16 samples
-    MSAAx16,
-}
-
-impl Antialiasing {
-    pub(crate) fn sample_count(self) -> u32 {
-        match self {
-            Antialiasing::MSAAx2 => 2,
-            Antialiasing::MSAAx4 => 4,
-            Antialiasing::MSAAx8 => 8,
-            Antialiasing::MSAAx16 => 16,
         }
     }
 }

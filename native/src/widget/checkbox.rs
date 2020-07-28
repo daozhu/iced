@@ -2,8 +2,7 @@
 use std::hash::Hash;
 
 use crate::{
-    input::{mouse, ButtonState},
-    layout, row, text, Align, Clipboard, Element, Event, Font, Hasher,
+    layout, mouse, row, text, Align, Clipboard, Element, Event, Hasher,
     HorizontalAlignment, Layout, Length, Point, Rectangle, Row, Text,
     VerticalAlignment, Widget,
 };
@@ -33,7 +32,8 @@ pub struct Checkbox<Message, Renderer: self::Renderer + text::Renderer> {
     width: Length,
     size: u16,
     spacing: u16,
-    text_size: u16,
+    text_size: Option<u16>,
+    font: Renderer::Font,
     style: Renderer::Style,
 }
 
@@ -61,7 +61,8 @@ impl<Message, Renderer: self::Renderer + text::Renderer>
             width: Length::Shrink,
             size: <Renderer as self::Renderer>::DEFAULT_SIZE,
             spacing: Renderer::DEFAULT_SPACING,
-            text_size: <Renderer as text::Renderer>::DEFAULT_SIZE,
+            text_size: None,
+            font: Renderer::Font::default(),
             style: Renderer::Style::default(),
         }
     }
@@ -94,7 +95,16 @@ impl<Message, Renderer: self::Renderer + text::Renderer>
     ///
     /// [`Checkbox`]: struct.Checkbox.html
     pub fn text_size(mut self, text_size: u16) -> Self {
-        self.text_size = text_size;
+        self.text_size = Some(text_size);
+        self
+    }
+
+    /// Sets the [`Font`] of the text of the [`Checkbox`].
+    ///
+    /// [`Checkbox`]: struct.Checkbox.html
+    /// [`Font`]: ../../struct.Font.html
+    pub fn font(mut self, font: Renderer::Font) -> Self {
+        self.font = font;
         self
     }
 
@@ -136,8 +146,9 @@ where
             )
             .push(
                 Text::new(&self.label)
+                    .font(self.font)
                     .width(self.width)
-                    .size(self.text_size),
+                    .size(self.text_size.unwrap_or(renderer.default_size())),
             )
             .layout(renderer, limits)
     }
@@ -152,10 +163,7 @@ where
         _clipboard: Option<&dyn Clipboard>,
     ) {
         match event {
-            Event::Mouse(mouse::Event::Input {
-                button: mouse::Button::Left,
-                state: ButtonState::Pressed,
-            }) => {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let mouse_over = layout.bounds().contains(cursor_position);
 
                 if mouse_over {
@@ -185,8 +193,8 @@ where
             defaults,
             label_layout.bounds(),
             &self.label,
-            self.text_size,
-            Font::Default,
+            self.text_size.unwrap_or(renderer.default_size()),
+            self.font,
             None,
             HorizontalAlignment::Left,
             VerticalAlignment::Center,

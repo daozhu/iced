@@ -3,11 +3,8 @@
 //! [`winit`]: https://github.com/rust-windowing/winit
 //! [`iced_native`]: https://github.com/hecrj/iced/tree/master/native
 use crate::{
-    input::{
-        keyboard::{self, KeyCode, ModifiersState},
-        mouse, ButtonState,
-    },
-    window, Event, Mode, MouseCursor,
+    keyboard::{self, KeyCode, ModifiersState},
+    mouse, window, Event, Mode, Point,
 };
 
 /// Converts a winit window event into an iced event.
@@ -27,6 +24,14 @@ pub fn window_event(
                 height: logical_size.height,
             }))
         }
+        WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+            let logical_size = new_inner_size.to_logical(scale_factor);
+
+            Some(Event::Window(window::Event::Resized {
+                width: logical_size.width,
+                height: logical_size.height,
+            }))
+        }
         WindowEvent::CursorMoved { position, .. } => {
             let position = position.to_logical::<f64>(scale_factor);
 
@@ -36,9 +41,15 @@ pub fn window_event(
             }))
         }
         WindowEvent::MouseInput { button, state, .. } => {
-            Some(Event::Mouse(mouse::Event::Input {
-                button: mouse_button(*button),
-                state: button_state(*state),
+            let button = mouse_button(*button);
+
+            Some(Event::Mouse(match state {
+                winit::event::ElementState::Pressed => {
+                    mouse::Event::ButtonPressed(button)
+                }
+                winit::event::ElementState::Released => {
+                    mouse::Event::ButtonReleased(button)
+                }
             }))
         }
         WindowEvent::MouseWheel { delta, .. } => match delta {
@@ -70,11 +81,28 @@ pub fn window_event(
                     ..
                 },
             ..
-        } => Some(Event::Keyboard(keyboard::Event::Input {
-            key_code: key_code(*virtual_keycode),
-            state: button_state(*state),
-            modifiers: modifiers_state(modifiers),
+        } => Some(Event::Keyboard({
+            let key_code = key_code(*virtual_keycode);
+            let modifiers = modifiers_state(modifiers);
+
+            match state {
+                winit::event::ElementState::Pressed => {
+                    keyboard::Event::KeyPressed {
+                        key_code,
+                        modifiers,
+                    }
+                }
+                winit::event::ElementState::Released => {
+                    keyboard::Event::KeyReleased {
+                        key_code,
+                        modifiers,
+                    }
+                }
+            }
         })),
+        WindowEvent::ModifiersChanged(new_modifiers) => Some(Event::Keyboard(
+            keyboard::Event::ModifiersChanged(modifiers_state(*new_modifiers)),
+        )),
         WindowEvent::HoveredFile(path) => {
             Some(Event::Window(window::Event::FileHovered(path.clone())))
         }
@@ -108,19 +136,23 @@ pub fn fullscreen(
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
 /// [`iced_native`]: https://github.com/hecrj/iced/tree/master/native
-pub fn mouse_cursor(mouse_cursor: MouseCursor) -> winit::window::CursorIcon {
-    match mouse_cursor {
-        MouseCursor::OutOfBounds => winit::window::CursorIcon::Default,
-        MouseCursor::Idle => winit::window::CursorIcon::Default,
-        MouseCursor::Pointer => winit::window::CursorIcon::Hand,
-        MouseCursor::Working => winit::window::CursorIcon::Progress,
-        MouseCursor::Grab => winit::window::CursorIcon::Grab,
-        MouseCursor::Grabbing => winit::window::CursorIcon::Grabbing,
-        MouseCursor::Text => winit::window::CursorIcon::Text,
-        MouseCursor::ResizingHorizontally => {
+pub fn mouse_interaction(
+    interaction: mouse::Interaction,
+) -> winit::window::CursorIcon {
+    use mouse::Interaction;
+
+    match interaction {
+        Interaction::Idle => winit::window::CursorIcon::Default,
+        Interaction::Pointer => winit::window::CursorIcon::Hand,
+        Interaction::Working => winit::window::CursorIcon::Progress,
+        Interaction::Grab => winit::window::CursorIcon::Grab,
+        Interaction::Grabbing => winit::window::CursorIcon::Grabbing,
+        Interaction::Crosshair => winit::window::CursorIcon::Crosshair,
+        Interaction::Text => winit::window::CursorIcon::Text,
+        Interaction::ResizingHorizontally => {
             winit::window::CursorIcon::EwResize
         }
-        MouseCursor::ResizingVertically => winit::window::CursorIcon::NsResize,
+        Interaction::ResizingVertically => winit::window::CursorIcon::NsResize,
     }
 }
 
@@ -134,17 +166,6 @@ pub fn mouse_button(mouse_button: winit::event::MouseButton) -> mouse::Button {
         winit::event::MouseButton::Right => mouse::Button::Right,
         winit::event::MouseButton::Middle => mouse::Button::Middle,
         winit::event::MouseButton::Other(other) => mouse::Button::Other(other),
-    }
-}
-
-/// Converts an `ElementState` from [`winit`] to an [`iced_native`] button state.
-///
-/// [`winit`]: https://github.com/rust-windowing/winit
-/// [`iced_native`]: https://github.com/hecrj/iced/tree/master/native
-pub fn button_state(element_state: winit::event::ElementState) -> ButtonState {
-    match element_state {
-        winit::event::ElementState::Pressed => ButtonState::Pressed,
-        winit::event::ElementState::Released => ButtonState::Released,
     }
 }
 
@@ -162,6 +183,16 @@ pub fn modifiers_state(
         alt: modifiers.alt(),
         logo: modifiers.logo(),
     }
+}
+
+/// Converts a physical cursor position to a logical `Point`.
+pub fn cursor_position(
+    position: winit::dpi::PhysicalPosition<f64>,
+    scale_factor: f64,
+) -> Point {
+    let logical_position = position.to_logical(scale_factor);
+
+    Point::new(logical_position.x, logical_position.y)
 }
 
 /// Converts a `VirtualKeyCode` from [`winit`] to an [`iced_native`] key code.
